@@ -152,8 +152,8 @@ class UshapedRobot():
         return sum((1.0/6) * m * s**2 + m * np.sum((np.array([(i - 0.5) * s, (j - 0.5) * s]) - self.r_cm)**2) for (i, j) in self.modules)
 
     def pump_direction(self,S):
-        return {'L': np.array([1, 0]), 'R': np.array([-1, 0]),
-                'T': np.array([0, -1]), 'B': np.array([0, 1])}[S]
+        return {'L': np.array([-1, 0]), 'R': np.array([1, 0]),
+                'T': np.array([0, 1]), 'B': np.array([0, -1])}[S]
 
     def define_external_pumps(self):
         ext_all = []
@@ -204,7 +204,7 @@ class UshapedRobot():
         # Compute net force in robot local frame
         force_local = np.array([0.0, 0.0])
         for (i, j, S) in self.pumps:
-            force_local += self.pump_direction(S) * self.fp * self.pumps[(i, j, S)]
+            force_local += -self.pump_direction(S) * self.fp * self.pumps[(i, j, S)]
         # Rotate force to world frame
         theta = np.radians(self.orientation)
         c, s_ = np.cos(theta), np.sin(theta)
@@ -227,7 +227,7 @@ class UshapedRobot():
             c, s_ = np.cos(np.radians(self.orientation)), np.sin(np.radians(self.orientation))
             R = np.array([[c, -s_], [s_, c]])
             r_world = R @ r_local
-            force_world = R @ (self.fp * activation * self.pump_direction(S))
+            force_world = R @ (self.fp * activation * -self.pump_direction(S))
 
             # 2D scalar torque = r_x * F_y - r_y * F_x
             self.torque += r_world[0] * force_world[1] - r_world[1] * force_world[0]
@@ -266,11 +266,39 @@ class UshapedRobot():
         vec = sensor_world - self.position
         angle = np.arctan2(vec[1], vec[0])
         return angle
-        
-    def compute_angle_to_rotate(self, active_sensors):
+
+    def angle_from_heading(self, sensor, sensor_fov_angle=0):
+        # Compute sensor position in local frame
+        i, j, face = sensor
+        module_center = np.array([(i - 0.5) * self.s, (j - 0.5) * self.s])
+        face_offset = self.pump_direction(face) * (self.s / 2)
+        sensor_local = module_center + face_offset
+        # Heading vector in local frame: from CoM to (s*(a+c/2), b+d)
+        heading_point = np.array([self.s * (self.a + self.c / 2.0), self.b + self.d])
+        heading_vec = heading_point - self.r_cm
+        # Vector from CoM to sensor in local frame
+        sensor_vec = sensor_local - self.r_cm
+        # Angle between heading_vec and sensor_vec
+        angle = np.arctan2(sensor_vec[1], sensor_vec[0]) - np.arctan2(heading_vec[1], heading_vec[0])
+        # Normalize to [-pi, pi]
+        angle = np.arctan2(np.sin(angle), np.cos(angle))
+        # Debug print for angle verification
+        # Also print world-frame heading vector for diagnostic
+        c, s_ = np.cos(np.radians(self.orientation)), np.sin(np.radians(self.orientation))
+        R = np.array([[c, -s_], [s_, c]])
+        heading_vec_world = R @ heading_vec
+        # print(f"[DEBUG] angle_from_heading: sensor={sensor}, angle(rad)={angle:.4f}, angle(deg)={np.degrees(angle):.2f}, heading_vec={heading_vec}, sensor_vec={sensor_vec}, heading_vec_world={heading_vec_world}, orientation={self.orientation:.2f}")
+        return angle
+                
+    def circular_mean(self, angles):
+        """Compute the mean of angles (in radians), correctly handling wraparound."""
+        return np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles)))
+
+    def compute_angle_to_rotate(self, active_sensors, sensor_fov_angle=0):
         """
         Divide active_sensors into left and right sets based on their i index.
-        For each sensor, compute the angle from the robot's heading (not just CoM) to the sensor's position.
+        For each sensor, compute the angle from the robot's heading (not just CoM) to the sensor's position,
+        including a field-of-view offset.
         Return the average of the set (left or right) with the bigger cardinality.
         If equal, return the average of the left set.
         Log the computed angles for debugging.
@@ -278,30 +306,15 @@ class UshapedRobot():
         left_sensors = [sensor for sensor in active_sensors if sensor[0] <= self.a + self.c]
         right_sensors = [sensor for sensor in active_sensors if sensor[0] > self.a + self.c]
 
-        def angle_from_heading(sensor):
-            # Compute sensor position in local frame
-            i, j, face = sensor
-            module_center = np.array([(i - 0.5) * self.s, (j - 0.5) * self.s])
-            face_offset = self.pump_direction(face) * (self.s / 2)
-            sensor_local = module_center + face_offset
-            # Heading vector in local frame: from CoM to (s*(a+c/2), b+d)
-            heading_point = np.array([self.s * (self.a + self.c / 2.0), self.b + self.d])
-            heading_vec = heading_point - self.r_cm
-            # Vector from CoM to sensor in local frame
-            sensor_vec = sensor_local - self.r_cm
-            # Angle between heading_vec and sensor_vec
-            angle = np.arctan2(sensor_vec[1], sensor_vec[0]) - np.arctan2(heading_vec[1], heading_vec[0])
-            # Normalize to [-pi, pi]
-            angle = np.arctan2(np.sin(angle), np.cos(angle))
-            print(f"[ANGLE-LOCAL] Sensor {sensor}: heading=({heading_vec[0]:.2f},{heading_vec[1]:.2f}), sensor=({sensor_vec[0]:.2f},{sensor_vec[1]:.2f}), rel={np.degrees(angle):.2f} deg")
-            return angle
-
         if len(left_sensors) > len(right_sensors):
-            return np.mean([angle_from_heading(sensor) for sensor in left_sensors])
+            angles = [self.angle_from_heading(sensor, sensor_fov_angle) for sensor in left_sensors]
+            return self.circular_mean(angles)
         elif len(right_sensors) > len(left_sensors):
-            return np.mean([angle_from_heading(sensor) for sensor in right_sensors])
+            angles = [self.angle_from_heading(sensor, sensor_fov_angle) for sensor in right_sensors]
+            return self.circular_mean(angles)
         else:
-            return np.mean([angle_from_heading(sensor) for sensor in left_sensors])
+            angles = [self.angle_from_heading(sensor, sensor_fov_angle) for sensor in left_sensors]
+            return self.circular_mean(angles)
 
     def controller(self):
         # Update state and motion based on sensors and current state:        
@@ -310,7 +323,7 @@ class UshapedRobot():
                 # print(f"[STATE] Switching to State.CL at time {self.time:.2f}, detected sensors: {self.active_sensors}")
                 self.state = State.CL
                 self.motion = Motion.Rotation
-                self.angle_to_rotate = np.degrees(self.compute_angle_to_rotate(self.active_sensors))
+                self.angle_to_rotate = np.degrees(self.compute_angle_to_rotate(self.active_sensors, sensor_fov_angle))
                 # print(f"[ROTATE] Set angle_to_rotate (sensor-based): {self.angle_to_rotate:.2f} deg at time {self.time:.2f}")
                 self.rotated_angle = 0.0
                 self.rotation_start_orientation = self.orientation
@@ -330,19 +343,25 @@ class UshapedRobot():
                     self.rotated_angle = delta
                     # print(f"[ROTATE] Rotating: rotated_angle={self.rotated_angle:.2f} deg, angle_to_rotate={self.angle_to_rotate:.2f} deg at time {self.time:.2f}")
                     if (self.angle_to_rotate >= 0 and self.rotated_angle >= self.angle_to_rotate) or (self.angle_to_rotate < 0 and self.rotated_angle <= self.angle_to_rotate):
+                        # print(f"[DEBUG] Rotation complete (RW): intended={self.angle_to_rotate:.2f} deg, actual={self.rotated_angle:.2f} deg, start={self.rotation_start_orientation:.2f} deg, end={self.orientation:.2f} deg")
+                        self.angular_velocity = 0.0  # Stop further rotation after completion
                         # print(f"[ROTATE] Rotation complete at time {self.time:.2f}")
                         self.motion = Motion.Forward
                         self.travelled_distance = 0.0
-                        self.forward_distance_to_travel = 10.0 #np.random.uniform(1.0, 50.0) # Random forward distance
+                        self.angle_to_rotate = 0.0
+                # Ensure consistent state
+                if self.motion == Motion.Forward:
+                    self.state = State.RW
         else: # self.state == State.CL
             if self.motion == Motion.Rotation:
                 # Compute signed rotated angle
                 delta = self.orientation - self.rotation_start_orientation
                 delta = (delta + 180) % 360 - 180
                 self.rotated_angle = delta
-                # print(f"[ROTATE] Rotating (CL): rotated_angle={self.rotated_angle:.2f} deg, angle_to_rotate={self.angle_to_rotate:.2f} deg at time {self.time:.2f}")
                 if (self.angle_to_rotate >= 0 and self.rotated_angle >= self.angle_to_rotate) or (self.angle_to_rotate < 0 and self.rotated_angle <= self.angle_to_rotate):
-                    # print(f"[ROTATE] Rotation complete (CL) at time {self.time:.2f}")
+                    # print(f"[DEBUG] Rotation complete (CL): intended={self.angle_to_rotate:.2f} deg, actual={self.rotated_angle:.2f} deg, start={self.rotation_start_orientation:.2f} deg, end={self.orientation:.2f} deg")
+                    self.angular_velocity = 0.0  # Stop further rotation after completion
+                    self.angular_acceleration = 0.0  # Also zero angular acceleration
                     self.motion = Motion.Forward
                     self.travelled_distance = 0.0
                     self.forward_distance_to_travel = 10.0
@@ -392,6 +411,7 @@ class UshapedRobot():
         # Normalize orientation to [0, 360)
         self.orientation = self.orientation % 360
         self.update_modules_position()
+        self.log_orientation_for_debug()  # Log after update, before plotting
 
         # Update travelled distance
         self.travelled_distance += np.linalg.norm(self.position - prev_position)
@@ -419,6 +439,18 @@ class UshapedRobot():
         if abs(self.angular_velocity) < 1e-8:
             self.angular_velocity = 0.0
 
+    def log_orientation_for_debug(self):
+        # Improved debug log for rotation and orientation
+        msg = f"[VISUAL-DEBUG] time={self.time:.2f}s | orientation={self.orientation:.2f} deg | angular_velocity={self.angular_velocity:.4f} deg/s"
+        if hasattr(self, 'rotation_start_orientation') and hasattr(self, 'angle_to_rotate') and hasattr(self, 'rotated_angle'):
+            intended_end = (self.rotation_start_orientation + self.angle_to_rotate) % 360
+            msg += (f" | rotation_start={self.rotation_start_orientation:.2f} deg"
+                    f" | intended_delta={self.angle_to_rotate:.2f} deg"
+                    f" | actual_delta={self.rotated_angle:.2f} deg"
+                    f" | expected_end={intended_end:.2f} deg")
+        msg += f" | motion={self.motion.name} | state={self.state.name}"
+        # print(msg)
+
     def check_sensors_readings(self, objects, sensor_fov_angle, sensor_range):
         """
         Efficiently check if any part of an object is within the sensor's FoV and range.
@@ -440,6 +472,8 @@ class UshapedRobot():
             face_angle = self.face_to_angle[face]
             sensor_angle = np.radians(self.orientation) + face_angle
             sensor_dir = np.array([np.cos(sensor_angle), np.sin(sensor_angle)])
+            # Print for debugging direction
+            # print(f"[SENSOR-DIR-DEBUG] sensor={sensor} face={face} face_angle={np.degrees(face_angle):.2f} orientation={self.orientation:.2f} sensor_angle={np.degrees(sensor_angle):.2f} sensor_dir={sensor_dir}")
             found = False
             for obj in objects:
                 obj_center = np.array(obj['center'])
@@ -447,9 +481,9 @@ class UshapedRobot():
                 # Vector from sensor to object center
                 vec = obj_center - sensor_pos
                 dist = np.linalg.norm(vec)
+                # DEBUG PRINTS
+                # print(f"[SENSOR-DEBUG] sensor={sensor} pos={sensor_pos} dir={sensor_dir} obj_center={obj_center} dist={dist:.3f}")
                 if dist > sensor_range + obj_radius:
-                    continue
-                if dist < self.s * 0.6:
                     continue
                 # Project vec onto sensor direction
                 proj = np.dot(vec, sensor_dir)
@@ -458,6 +492,7 @@ class UshapedRobot():
                 # For very small FoV, treat as a ray with width = object radius
                 if sensor_fov_angle <= 1e-3:
                     if 0 < proj < sensor_range and perp <= obj_radius:
+                        # print(f"[SENSOR-DEBUG] --> DETECTED (ray mode): proj={proj:.3f}, perp={perp:.3f}")
                         found = True
                         break
                 else:
@@ -469,7 +504,10 @@ class UshapedRobot():
                         angle_span = np.pi
                     fov_half = np.radians(sensor_fov_angle / 2)
                     angle_diff = np.arctan2(np.sin(obj_angle - sensor_angle), np.cos(obj_angle - sensor_angle))
-                    if abs(angle_diff) - angle_span <= fov_half:
+                    # print(f"[SENSOR-DEBUG]    obj_angle={np.degrees(obj_angle):.2f} sensor_angle={np.degrees(sensor_angle):.2f} angle_diff={np.degrees(angle_diff):.2f} angle_span={np.degrees(angle_span):.2f} fov_half={np.degrees(fov_half):.2f}")
+                    # Robust overlap check:
+                    if abs(angle_diff) <= fov_half + angle_span:
+                        # print(f"[SENSOR-DEBUG] --> DETECTED (fov mode, robust): angle_diff={np.degrees(angle_diff):.2f}, angle_span={np.degrees(angle_span):.2f}")
                         found = True
                         break
             self.sensors[sensor] = 1.0 if found else 0.0
@@ -492,16 +530,16 @@ class UshapedRobot():
         local_center = R @ (np.array(obj_center) - self.position) + self.r_cm
         epsilon = 1e-6
         # Print robot and object info for every check
-        print(f"[CAVITY-DEBUG] Robot pos={self.position}, orient={self.orientation:.2f} deg")
-        print(f"[CAVITY-DEBUG] Object world={obj_center}, local={local_center}, radius={obj_radius}")
-        print(f"[CAVITY-DEBUG] Cavity x:[{x_min},{x_max}], y:[{y_min},{y_max}] (s={self.s}, a={self.a}, b={self.b}, c={self.c}, d={self.d})")
-        print(f"[CAVITY-DEBUG] x_dist_left={local_center[0] - (x_min + obj_radius):.6f}, x_dist_right={(x_max - obj_radius) - local_center[0]:.6f}, y_dist_bottom={local_center[1] - (y_min + obj_radius):.6f}, y_dist_top={(y_max - obj_radius) - local_center[1]:.6f}")
+        # print(f"[CAVITY-DEBUG] Robot pos={self.position}, orient={self.orientation:.2f} deg")
+        # print(f"[CAVITY-DEBUG] Object world={obj_center}, local={local_center}, radius={obj_radius}")
+        # print(f"[CAVITY-DEBUG] Cavity x:[{x_min},{x_max}], y:[{y_min},{y_max}] (s={self.s}, a={self.a}, b={self.b}, c={self.c}, d={self.d})")
+        # print(f"[CAVITY-DEBUG] x_dist_left={local_center[0] - (x_min + obj_radius):.6f}, x_dist_right={(x_max - obj_radius) - local_center[0]:.6f}, y_dist_bottom={local_center[1] - (y_min + obj_radius):.6f}, y_dist_top={(y_max - obj_radius) - local_center[1]:.6f}")
         # Check if the entire object is inside the cavity rectangle (with margin for radius and epsilon)
         if (x_min + obj_radius - epsilon <= local_center[0] <= x_max - obj_radius + epsilon and
             y_min + obj_radius - epsilon <= local_center[1] <= y_max - obj_radius + epsilon):
-            print(f"[CAVITY-DEBUG] Object at {obj_center} (local {local_center}) is INSIDE cavity.")
+            # print(f"[CAVITY-DEBUG] Object at {obj_center} (local {local_center}) is INSIDE cavity.")
             return True
-        print(f"[CAVITY-DEBUG] Object at {obj_center} (local {local_center}) is OUTSIDE cavity.")
+        # print(f"[CAVITY-DEBUG] Object at {obj_center} (local {local_center}) is OUTSIDE cavity.")
         return False
 
 class Simulation(object):
@@ -546,7 +584,7 @@ class Simulation(object):
         for obj in self.objects:
             if self.robot.is_object_in_cavity(obj['center'], obj['radius']):
                 self.collected_objects += 1
-                print(f"[COLLECT] Object collected at {obj['center']}, total: {self.collected_objects}")
+                # print(f"[COLLECT] Object collected at {obj['center']}, total: {self.collected_objects}")
             else:
                 remaining_objects.append(obj)
         self.objects = remaining_objects
@@ -571,11 +609,13 @@ class Simulation(object):
         # Draw FoV sensors
         for sensor in self.robot.sensors:
             i, j, face = sensor
-            # Sensor position in local frame
+            # Sensor position in local frame (module center + face offset)
             module_center = np.array([(i - 0.5) * self.robot.s, (j - 0.5) * self.robot.s])
+            face_offset = self.robot.pump_direction(face) * (self.robot.s / 2)
+            sensor_local = module_center + face_offset
             c, s_ = np.cos(np.radians(self.robot.orientation)), np.sin(np.radians(self.robot.orientation))
             R = np.array([[c, -s_], [s_, c]])
-            module_center_world = R @ (module_center - self.robot.r_cm) + self.robot.position
+            sensor_pos_world = R @ (sensor_local - self.robot.r_cm) + self.robot.position
             # Sensor direction in world frame (unit vector)
             face_angle = self.robot.face_to_angle[face]
             sensor_angle = np.radians(self.robot.orientation) + face_angle
@@ -586,7 +626,7 @@ class Simulation(object):
             wedge_color = 'red' if is_active else 'green'
             wedge_alpha = 0.3 if is_active else 0.2
             wedge = plt.matplotlib.patches.Wedge(
-                module_center_world, sensor_range, theta1, theta2, color=wedge_color, alpha=wedge_alpha
+                sensor_pos_world, sensor_range, theta1, theta2, color=wedge_color, alpha=wedge_alpha
             )
             self.ax.add_patch(wedge)
 
@@ -610,6 +650,24 @@ class Simulation(object):
         cavity_polygon = Polygon(cavity_corners_world, closed=True, facecolor='yellow', edgecolor='orange', alpha=0.2, linewidth=2)
         self.ax.add_patch(cavity_polygon)
 
+        # Draw heading vector (red arrow from CoM)
+        heading_point = np.array([self.robot.s * (self.robot.a + self.robot.c / 2.0), self.robot.b + self.robot.d])
+        heading_vec = heading_point - self.robot.r_cm
+        c, s_ = np.cos(np.radians(self.robot.orientation)), np.sin(np.radians(self.robot.orientation))
+        R = np.array([[c, -s_], [s_, c]])
+        heading_vec_world = R @ heading_vec
+        start = self.robot.position
+        end = self.robot.position + heading_vec_world
+        self.ax.arrow(start[0], start[1], heading_vec_world[0], heading_vec_world[1], head_width=0.5, head_length=1.0, fc='red', ec='red', linewidth=2, length_includes_head=True, zorder=10)
+
+        # Draw expected heading vector (blue arrow from CoM) if in rotation mode
+        if hasattr(self.robot, 'rotation_start_orientation') and hasattr(self.robot, 'angle_to_rotate'):
+            expected_end_orientation = (self.robot.rotation_start_orientation + self.robot.angle_to_rotate) % 360
+            c_exp, s_exp = np.cos(np.radians(expected_end_orientation)), np.sin(np.radians(expected_end_orientation))
+            R_exp = np.array([[c_exp, -s_exp], [s_exp, c_exp]])
+            heading_vec_expected = R_exp @ heading_vec
+            self.ax.arrow(start[0], start[1], heading_vec_expected[0], heading_vec_expected[1], head_width=0.5, head_length=1.0, fc='blue', ec='blue', linewidth=2, length_includes_head=True, zorder=10)
+
         # Set limits and aspect ratio
         self.ax.set_xlim(0, self.env_size[0])
         self.ax.set_ylim(0, self.env_size[1])
@@ -629,10 +687,10 @@ env_size=[100.0,100.0]
 initial_robot_position=[50.0,50.0]
 initial_robot_orientation = 0.0
 experiment_time = 1000.0
-dt = 1
-n_objects = 10  # Restore to 10 random objects
+dt = 1.0
+n_objects = 50  # Restore to 10 random objects
 object_radius = 0.5  # Set the radius of the objects
-sensor_fov_angle = 1  # degrees
+sensor_fov_angle = 30  # degrees
 sensor_range = 3.0    # units
 simulation = Simulation(a, b, c, d, s, m,fp, env_size, initial_robot_position, initial_robot_orientation,dt, n_objects=n_objects, object_radius=object_radius)
 plt.ion()
