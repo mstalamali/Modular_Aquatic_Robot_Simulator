@@ -3,6 +3,7 @@ import numpy as np
 # import sympy
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle, Polygon
+from matplotlib.widgets import Button
 
 def rotate_point_2d(pt, pt_c, theta_deg):
     """
@@ -349,9 +350,7 @@ class UshapedRobot():
                         self.motion = Motion.Forward
                         self.travelled_distance = 0.0
                         self.angle_to_rotate = 0.0
-                # Ensure consistent state
-                if self.motion == Motion.Forward:
-                    self.state = State.RW
+                        self.rotation_start_orientation = self.orientation  # Reset start orientation for next rotation
         else: # self.state == State.CL
             if self.motion == Motion.Rotation:
                 # Compute signed rotated angle
@@ -368,8 +367,11 @@ class UshapedRobot():
             else: # self.motion == Motion.Forward
                 if self.travelled_distance >= self.forward_distance_to_travel:
                     self.state = State.RW
-                    self.motion = Motion.Forward
+                    self.motion = Motion.Rotation
                     self.travelled_distance = 0.0
+                    self.angle_to_rotate = np.degrees(np.random.uniform(-np.pi, np.pi))
+                    self.rotated_angle = 0.0
+                    self.rotation_start_orientation = self.orientation
         # Reset all pumps to 0.0 before activating the required ones
         for key in self.pumps:
             self.pumps[key] = 0.0
@@ -563,6 +565,12 @@ class Simulation(object):
         self.objects = self.spawn_objects(n_objects, object_radius)
         self.collected_objects = 0
 
+        # Pause/resume functionality
+        self.paused = False
+        self.pause_button_ax = self.fig.add_axes([0.85, 0.01, 0.1, 0.05])
+        self.pause_button = Button(self.pause_button_ax, 'Pause')
+        self.pause_button.on_clicked(self.toggle_pause)
+    
     def spawn_objects(self, n, radius):
         # Always use random spawning for all n
         objects = []
@@ -572,6 +580,14 @@ class Simulation(object):
             y = np.random.uniform(margin, self.env_size[1] - margin)
             objects.append({'center': (x, y), 'radius': radius})
         return objects
+
+    def toggle_pause(self, event=None):
+        self.paused = not self.paused
+        if self.paused:
+            self.pause_button.label.set_text('Resume')
+        else:
+            self.pause_button.label.set_text('Pause')
+        self.fig.canvas.draw_idle()
 
     def step(self):
         # Efficiently update sensor readings based on objects in the environment
@@ -686,7 +702,7 @@ s,m,fp = 1.0, 1.0, 1.0
 env_size=[100.0,100.0]
 initial_robot_position=[50.0,50.0]
 initial_robot_orientation = 0.0
-experiment_time = 1000.0
+experiment_time = 2000.0
 dt = 1.0
 n_objects = 50  # Restore to 10 random objects
 object_radius = 0.5  # Set the radius of the objects
@@ -700,9 +716,12 @@ while simulation.time <= experiment_time:
     if not plt.fignum_exists(simulation.fig.number):
         break
 
-    simulation.step()
-    simulation.visualise()
-    simulation.time += dt
+    if not simulation.paused:
+        simulation.step()
+        simulation.visualise()
+        simulation.time += dt
+    else:
+        plt.pause(0.05)  # allow UI to update and button to be pressed
 
 plt.ioff()  # turn off interactive mode when done
 plt.show()  # final show to keep the window open at the end
