@@ -348,6 +348,7 @@ class UshapedRobot():
                         self.angular_velocity = 0.0  # Stop further rotation after completion
                         # print(f"[ROTATE] Rotation complete at time {self.time:.2f}")
                         self.motion = Motion.Forward
+                        self.forward_distance_to_travel = 10.0
                         self.travelled_distance = 0.0
                         self.angle_to_rotate = 0.0
                         self.rotation_start_orientation = self.orientation  # Reset start orientation for next rotation
@@ -363,7 +364,7 @@ class UshapedRobot():
                     self.angular_acceleration = 0.0  # Also zero angular acceleration
                     self.motion = Motion.Forward
                     self.travelled_distance = 0.0
-                    self.forward_distance_to_travel = 10.0
+                    self.forward_distance_to_travel = sensor_range
             else: # self.motion == Motion.Forward
                 if self.travelled_distance >= self.forward_distance_to_travel:
                     self.state = State.RW
@@ -546,7 +547,7 @@ class UshapedRobot():
 
 class Simulation(object):
     """docstring for ClassName"""
-    def __init__(self, a=1, b=1, c=1, d=1, s=1.0, m = 1.0,fp=1.0, env_size=[100.0,100.0], initial_robot_position=[0.0,0.0], initial_robot_orientation = 0.0, dt=0.1, n_objects=5, object_radius=2.0):
+    def __init__(self, a=1, b=1, c=1, d=1, s=1.0, m = 1.0,fp=1.0, env_size=[100.0,100.0], initial_robot_position=[0.0,0.0], initial_robot_orientation = 0.0, dt=0.1, n_objects=5, object_radius=2.0, save_frames=False, frames_dir="frames"):
         self.a = a
         self.b = b
         self.c = c
@@ -557,8 +558,8 @@ class Simulation(object):
         self.robot = UshapedRobot(a, b, c, d,s,m,fp,initial_robot_position,initial_robot_orientation,dt)
         self.env_size = env_size
         self.time = 0.0
-        self.fig = plt.figure(figsize=tuple(self.env_size))
-        self.ax = plt.gca()
+        # Use a reasonable figure size in inches (not environment units!)
+        self.fig, self.ax = plt.subplots(figsize=(8, 8))
         self.dt = dt
         self.n_objects = n_objects
         self.object_radius = object_radius
@@ -570,6 +571,20 @@ class Simulation(object):
         self.pause_button_ax = self.fig.add_axes([0.85, 0.01, 0.1, 0.05])
         self.pause_button = Button(self.pause_button_ax, 'Pause')
         self.pause_button.on_clicked(self.toggle_pause)
+
+        # Frame saving
+        self.save_frames = save_frames
+        self.frames_dir = frames_dir
+        self.frame_count = 0
+        if self.save_frames:
+            import os
+            try:
+                os.makedirs(self.frames_dir, exist_ok=True)
+                abs_path = os.path.abspath(self.frames_dir)
+                print(f"[INFO] Frames directory (relative): {self.frames_dir}")
+                print(f"[INFO] Frames directory (absolute): {abs_path}")
+            except Exception as e:
+                print(f"[ERROR] Could not create frames directory '{self.frames_dir}': {e}")
     
     def spawn_objects(self, n, radius):
         # Always use random spawning for all n
@@ -690,7 +705,18 @@ class Simulation(object):
         self.ax.set_aspect('equal', adjustable='box')
         self.ax.set_title(f"Time: {self.time:.2f}s")
 
-        plt.pause(0.01)  # brief pause to update the figure
+        if self.save_frames:
+            try:
+                import os
+                fname = os.path.join(self.frames_dir, f"frame_{self.frame_count:05d}.png")
+                self.fig.canvas.draw()  # Ensure the canvas is rendered
+                self.fig.savefig(fname, dpi=100, bbox_inches='tight')
+                print(f"[FRAME] Saved {fname} (absolute: {os.path.abspath(fname)})")
+                self.frame_count += 1
+            except Exception as e:
+                print(f"[ERROR] Could not save frame {self.frame_count}: {e}")
+        else:
+            plt.pause(0.01)  # brief pause to update the figure
         
 
     
@@ -708,18 +734,33 @@ n_objects = 50  # Restore to 10 random objects
 object_radius = 0.5  # Set the radius of the objects
 sensor_fov_angle = 30  # degrees
 sensor_range = 3.0    # units
-simulation = Simulation(a, b, c, d, s, m,fp, env_size, initial_robot_position, initial_robot_orientation,dt, n_objects=n_objects, object_radius=object_radius)
+
+# --- FRAME SAVING FLAG ---
+save_frames = False  # Set to True to save frames as PNGs, False to disable
+frames_dir = "frames"  # Directory to save frames
+
+simulation = Simulation(a, b, c, d, s, m,fp, env_size, initial_robot_position, initial_robot_orientation,dt, n_objects=n_objects, object_radius=object_radius, save_frames=save_frames, frames_dir=frames_dir)
+print(f"[INFO] Saving frames: {save_frames}, frames directory: {frames_dir}")
 plt.ion()
 
+import time
+start_time = time.time()
 while simulation.time <= experiment_time:
     # Exit loop if figure is closed
     if not plt.fignum_exists(simulation.fig.number):
         break
 
+
     if not simulation.paused:
         simulation.step()
         simulation.visualise()
+        if not simulation.save_frames:
+            plt.pause(0.05)  # ensure the animation is visible in real time
         simulation.time += dt
+        # Print progress every 10 frames
+        if simulation.save_frames and simulation.frame_count % 10 == 0:
+            elapsed = time.time() - start_time
+            print(f"[INFO] Frame {simulation.frame_count}, sim time: {simulation.time:.2f}, elapsed: {elapsed:.1f}s")
     else:
         plt.pause(0.05)  # allow UI to update and button to be pressed
 
